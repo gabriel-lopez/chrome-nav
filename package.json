@@ -1,0 +1,25 @@
+{
+  "name": "chrome-nav",
+  "version": "0.1.0",
+  "description": "CLI to drive a real Chrome instance via CDP (navigate, click, type, inspect DOM/console/network)",
+  "private": true,
+  "bin": {
+    "chrome-nav": "build/app/cli.cjs"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "rm -rf build && esbuild src/cli.ts --bundle --platform=node --format=cjs --outfile=build/app/cli.cjs && cp node_modules/playwright-core/browsers.json build/browsers.json && cp node_modules/playwright-core/package.json build/package.json",
+    "dev": "tsx src/cli.ts",
+    "package": "npm run build && pkg build/app/cli.cjs --targets node22-macos-arm64 --output chrome-nav-macos-arm64"
+  },
+  "dependencies": {
+    "commander": "^15.1.0",
+    "playwright-core": "^1.65.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
