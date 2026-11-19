@@ -38,40 +38,73 @@ chrome-nav stop
 ```
 
 Tabs:
+```
 chrome-nav status                     # daemon/Chrome connection + open tabs
 chrome-nav tabs                       # list open tabs
+chrome-nav open-tab [url]             # new tab, becomes the active tab
 chrome-nav switch-tab <id>            # make a tab the default target
 chrome-nav close-tab <id>
 ```
 
 Navigation:
 ```
-chrome-nav navigate <url>
+chrome-nav navigate <url> [--wait-until load|domcontentloaded|networkidle|commit]
 chrome-nav back
 chrome-nav forward
 ```
 
+Finding elements (prefer this over guessing selectors):
+```
+chrome-nav snapshot [--limit <n>]     # visible interactive elements with refs (@e1, @e2, ...)
+```
+A ref can be used anywhere a selector is accepted (`click @e3`, `type @e4 "x"`).
+Refs are valid until the next `snapshot` or navigation; re-run `snapshot` if a
+command says the ref is no longer on the page.
+
 Interaction:
 ```
 chrome-nav click <selector>
+chrome-nav hover <selector>
 chrome-nav type <selector> <text> [--enter]      # --enter presses Enter after typing
+chrome-nav press <key> [--selector <sel>]        # Enter, Escape, Tab, Control+A, ...
+chrome-nav select <selector> <value...>          # <select> option by value or label
+chrome-nav check <selector> / uncheck <selector>
+chrome-nav upload <selector> <file...>
+chrome-nav drag <from> <to>
 chrome-nav scroll [--selector <sel>] [--x <n>] [--y <n>]
-chrome-nav wait <selector> [--timeout <ms>]      # default timeout 10000ms
+```
+
+Waiting (give exactly one condition):
+```
+chrome-nav wait <selector> [--state attached|detached|visible|hidden]
+chrome-nav wait --text <text>                    # body text appears
+chrome-nav wait --url <substring>                # URL contains substring
+chrome-nav wait --load-state load|domcontentloaded|networkidle
+                                                 # all accept --timeout <ms>, default 10000
 ```
 
 Reading page state:
 ```
 chrome-nav screenshot [path] [--full-page]       # default path: ~/.chrome-nav/screenshots/<timestamp>.png
-chrome-nav text [--selector <sel>]               # innerText
+chrome-nav text [--selector <sel>] [--max-length <n>]   # innerText
 chrome-nav dom [--selector <sel>] [--max-length <n>]   # HTML, truncated (default 5000 chars)
 chrome-nav eval <js-expression>                  # runs in page context, prints JSON-serializable result
 ```
 
-Logs:
+Logs and tracing:
 ```
-chrome-nav console [--tail <n>] [--clear]
-chrome-nav network [--tail <n>] [--filter <substring>] [--clear]
+chrome-nav console [--tail <n>] [--clear] [--follow]
+chrome-nav network [--tail <n>] [--filter <substring>] [--clear] [--follow]
+chrome-nav trace start
+chrome-nav trace stop [path]                     # Playwright trace .zip, default ~/.chrome-nav/traces/
 ```
+`--follow` streams new entries as JSON lines until interrupted (don't combine with `--clear`).
+
+Global flag `--json` makes errors machine-readable (`{"ok":false,"error":...}`)
+and suppresses plain-text status messages.
+
+`eval` can be disabled by whoever ran `chrome-nav start --no-eval`; if it
+reports it is disabled, don't try to work around it.
 
 Every command above accepts `--tab <id>` to target a specific tab; without
 it, the active tab is used. The active tab is the first tab the daemon saw;

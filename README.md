@@ -12,8 +12,11 @@ Runtime files live in `~/.chrome-nav/`:
 | --- | --- |
 | `profile/` | Chrome user-data-dir (cookies and logins persist across restarts) |
 | `screenshots/` | Default screenshot output |
-| `state.json` | Ports and PIDs |
+| `traces/` | Default trace output |
+| `state.json` | Ports, PIDs, and the daemon auth token (mode 0600) |
 | `daemon.log`, `chrome.log` | Logs |
+
+Set `CHROME_NAV_HOME` to use a different runtime directory (separate state, token, and profile), e.g. to run an isolated instance alongside your normal one.
 
 ## Setup
 
@@ -46,23 +49,56 @@ chrome-nav stop
 
 | Command | Description |
 | --- | --- |
-| `start` | Launch Chrome and the daemon (`--headless`, `--url`, `--chrome-port`, `--daemon-port`, `--profile`) |
+| `start` | Launch Chrome and the daemon (`--headless`, `--url`, `--chrome-port`, `--daemon-port`, `--profile`, `--no-eval`) |
 | `stop` | Shut down the daemon and the managed Chrome |
 | `status` | Show connection status and open tabs |
 | `tabs` | List open tabs |
+| `open-tab [url]` | Open a new tab and make it active |
 | `switch-tab <id>` | Set the active tab |
 | `close-tab <id>` | Close a tab |
-| `navigate <url>` | Go to a URL |
+| `navigate <url>` | Go to a URL (`--wait-until load\|domcontentloaded\|networkidle\|commit`) |
 | `back` / `forward` | History navigation |
+| `snapshot` | List visible interactive elements with refs like `@e3` (`--limit`) |
 | `click <selector>` | Click an element |
+| `hover <selector>` | Hover over an element |
 | `type <selector> <text>` | Fill a field (`--enter` to submit) |
+| `press <key>` | Press a key such as `Escape` or `Control+A` (`--selector` to target an element) |
+| `select <selector> <values...>` | Choose options in a `<select>` by value or label |
+| `check` / `uncheck <selector>` | Toggle a checkbox or radio button |
+| `upload <selector> <files...>` | Set files on a file input |
+| `drag <from> <to>` | Drag one element onto another |
 | `scroll` | Scroll the page or an element into view (`--selector`, `--x`, `--y`) |
-| `wait <selector>` | Wait for an element (`--timeout`) |
+| `wait [selector]` | Wait for an element (`--state`), `--text`, `--url`, or `--load-state` (plus `--timeout`) |
 | `screenshot [path]` | Save a PNG (`--full-page`) |
-| `text` | Visible text of the page or a selector |
+| `text` | Visible text of the page or a selector (`--selector`, `--max-length`) |
 | `dom` | HTML of the page or a selector (`--max-length`) |
 | `eval <code>` | Evaluate JS in the page and print the result |
-| `console` | Dump buffered console logs (`--tail`, `--clear`) |
-| `network` | Dump buffered network requests (`--tail`, `--filter`, `--clear`) |
+| `console` | Dump buffered console logs (`--tail`, `--clear`, `--follow`) |
+| `network` | Dump buffered network requests (`--tail`, `--filter`, `--clear`, `--follow`) |
+| `trace start` / `trace stop [path]` | Record a Playwright trace (DOM snapshots, screenshots, actions) to a `.zip` |
 
 Most commands accept `--tab <id>` to target a tab other than the active one. Selectors use Playwright syntax: CSS, `text=Sign in`, `role=button[name=Submit]`, and so on.
+
+### Snapshot refs
+
+`chrome-nav snapshot` stamps each visible interactive element with a ref (`@e1`, `@e2`, ...) and lists its role, accessible name, and state. Pass a ref anywhere a selector is accepted:
+
+```sh
+chrome-nav snapshot
+chrome-nav type @e4 "hello"
+chrome-nav click @e1
+```
+
+Refs are valid until the next `snapshot` or a page navigation. A stale ref fails with a message telling you to snapshot again. Password values are never included in snapshots.
+
+### Output and errors
+
+Commands print JSON. Pass the global `--json` flag (before or after the subcommand) to also get plain-text messages (`stop`, `start` progress) and errors as JSON; errors become `{"ok": false, "error": "..."}` with a non-zero exit code. `console --follow` and `network --follow` stream one JSON object per line until interrupted.
+
+Selector failures are explicit: an ambiguous selector reports that it matched multiple elements, and a missing one suggests `snapshot` or `wait`.
+
+## Security
+
+- The daemon listens on `127.0.0.1` only and requires a random bearer token (stored in `state.json`, readable only by you) on every command. Requests without it get `401`, and non-JSON content types get `415`, which blocks cross-site requests from web pages.
+- `chrome-nav start --no-eval` disables the `eval` command for that daemon.
+- The Chrome profile holds your cookies and logins, so treat anyone who can run `chrome-nav` as you.
