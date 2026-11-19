@@ -1,13 +1,49 @@
-import { chromium, Browser, BrowserContext, Page } from "playwright-core";
-import type { ConsoleEntry, NetworkEntry, TabInfo } from "./types";
+import { chromium, Browser, BrowserContext, Locator, Page } from "playwright-core";
+import type { ConsoleEntry, NetworkEntry, Snapshot, TabInfo } from "./types";
 
 const MAX_LOG_ENTRIES = 500;
+const ACTION_TIMEOUT = 10000;
+const REF_PATTERN = /^@e(\d+)$/;
+
+export type LoadState = "load" | "domcontentloaded" | "networkidle" | "commit";
+
+export interface WaitOptions {
+  selector?: string;
+  state?: "attached" | "detached" | "visible" | "hidden";
+  text?: string;
+  url?: string;
+  loadState?: "load" | "domcontentloaded" | "networkidle";
+  timeout: number;
+}
+
+// Snapshot refs ("@e3") are stamped onto elements as a data attribute so every
+// action can reuse the normal Locator machinery.
+function resolveSelector(selector: string): string {
+  const m = REF_PATTERN.exec(selector);
+  return m ? `[data-cn-ref="e${m[1]}"]` : selector;
+}
+
+function explainError(selector: string, err: unknown, timeout: number): Error {
+  const error = err instanceof Error ? err : new Error(String(err));
+  if (/strict mode violation/.test(error.message)) {
+    return new Error(
+      `Selector "${selector}" matched multiple elements. Make it more specific, or use a snapshot ref (@eN).`
+    );
+  }
+  if (error.name === "TimeoutError") {
+    return new Error(
+      `No actionable element matched "${selector}" within ${timeout}ms. Run 'snapshot' to find refs, or 'wait' for it first.`
+    );
+  }
+  return error;
+}
 
 export class BrowserManager {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private pages = new Map<string, Page>();
   private nextId = 1;
+  private nextSeq = 1;
   private activeTabId: string | null = null;
   private consoleLogs: ConsoleEntry[] = [];
   private networkLogs: NetworkEntry[] = [];
@@ -38,6 +74,7 @@ export class BrowserManager {
   }
 
   private registerPage(page: Page): void {
+    if ([...this.pages.values()].includes(page)) return;
     const id = `t${this.nextId++}`;
     this.pages.set(id, page);
     if (this.activeTabId === null) this.activeTabId = id;
@@ -67,12 +104,12 @@ export class BrowserManager {
   }
 
   private pushConsole(tabId: string, type: string, text: string): void {
-    this.consoleLogs.push({ tabId, type, text, timestamp: Date.now() });
+    this.consoleLogs.push({ seq: this.nextSeq++, tabId, type, text, timestamp: Date.now() });
     if (this.consoleLogs.length > MAX_LOG_ENTRIES) this.consoleLogs.shift();
   }
 
   private pushNetwork(tabId: string, method: string, url: string, status: number | null): void {
-    this.networkLogs.push({ tabId, method, url, status, timestamp: Date.now() });
+    this.networkLogs.push({ seq: this.nextSeq++, tabId, method, url, status, timestamp: Date.now() });
     if (this.networkLogs.length > MAX_LOG_ENTRIES) this.networkLogs.shift();
   }
 
@@ -82,6 +119,28 @@ export class BrowserManager {
     const page = this.pages.get(id);
     if (!page) throw new Error(`Unknown tab id "${id}". Run 'tabs' to list open tabs.`);
     return page;
+  }
+
+  private locate(selector: string, tabId?: string): Locator {
+    return this.getPage(tabId).locator(resolveSelector(selector));
+  }
+
+  // Resolves refs and fails fast on stale ones instead of letting Playwright time out.
+  private async locateChecked(selector: string, tabId?: string): Promise<Locator> {
+    const loc = this.locate(selector, tabId);
+    if (REF_PATTERN.test(selector) && (await loc.count()) === 0) {
+      throw new Error(`Ref ${selector} is not on the page. Run 'snapshot' again to refresh refs.`);
+    }
+    return loc;
+  }
+
+  private async act(selector: string, tabId: string | undefined, fn: (loc: Locator) => Promise<void>): Promise<void> {
+    const loc = await this.locateChecked(selector, tabId);
+    try {
+      await fn(loc);
+    } catch (err) {
+      throw explainError(selector, err, ACTION_TIMEOUT);
+    }
   }
 
   async listTabs(): Promise<TabInfo[]> {
@@ -98,6 +157,17 @@ export class BrowserManager {
     return result;
   }
 
+  async openTab(url?: string): Promise<string> {
+    if (!this.context) throw new Error("Not connected to Chrome.");
+    const page = await this.context.newPage();
+    this.registerPage(page);
+    const id = [...this.pages.entries()].find(([, p]) => p === page)?.[0];
+    if (!id) throw new Error("Failed to register the new tab.");
+    this.activeTabId = id;
+    if (url) await page.goto(url, { waitUntil: "load", timeout: 30000 });
+    return id;
+  }
+
   setActiveTab(tabId: string): void {
     if (!this.pages.has(tabId)) {
       throw new Error(`Unknown tab id "${tabId}". Run 'tabs' to list open tabs.`);
@@ -110,9 +180,9 @@ export class BrowserManager {
     await page.close();
   }
 
-  async navigate(url: string, tabId?: string): Promise<void> {
+  async navigate(url: string, waitUntil: LoadState, tabId?: string): Promise<void> {
     const page = this.getPage(tabId);
-    await page.goto(url, { waitUntil: "load", timeout: 30000 });
+    await page.goto(url, { waitUntil, timeout: 30000 });
   }
 
   async back(tabId?: string): Promise<void> {
@@ -124,48 +194,224 @@ export class BrowserManager {
   }
 
   async click(selector: string, tabId?: string): Promise<void> {
-    await this.getPage(tabId).click(selector, { timeout: 10000 });
+    await this.act(selector, tabId, (loc) => loc.click({ timeout: ACTION_TIMEOUT }));
+  }
+
+  async hover(selector: string, tabId?: string): Promise<void> {
+    await this.act(selector, tabId, (loc) => loc.hover({ timeout: ACTION_TIMEOUT }));
   }
 
   async type(selector: string, text: string, pressEnter: boolean, tabId?: string): Promise<void> {
-    const page = this.getPage(tabId);
-    await page.fill(selector, text, { timeout: 10000 });
-    if (pressEnter) await page.press(selector, "Enter");
+    await this.act(selector, tabId, async (loc) => {
+      await loc.fill(text, { timeout: ACTION_TIMEOUT });
+      if (pressEnter) await loc.press("Enter");
+    });
+  }
+
+  async press(key: string, selector?: string, tabId?: string): Promise<void> {
+    if (!selector) {
+      await this.getPage(tabId).keyboard.press(key);
+      return;
+    }
+    await this.act(selector, tabId, (loc) => loc.press(key, { timeout: ACTION_TIMEOUT }));
+  }
+
+  async select(selector: string, values: string[], tabId?: string): Promise<string[]> {
+    let selected: string[] = [];
+    await this.act(selector, tabId, async (loc) => {
+      selected = await loc.selectOption(values, { timeout: ACTION_TIMEOUT });
+    });
+    return selected;
+  }
+
+  async setChecked(selector: string, checked: boolean, tabId?: string): Promise<void> {
+    await this.act(selector, tabId, (loc) =>
+      checked ? loc.check({ timeout: ACTION_TIMEOUT }) : loc.uncheck({ timeout: ACTION_TIMEOUT })
+    );
+  }
+
+  async upload(selector: string, files: string[], tabId?: string): Promise<void> {
+    await this.act(selector, tabId, (loc) => loc.setInputFiles(files, { timeout: ACTION_TIMEOUT }));
+  }
+
+  async drag(from: string, to: string, tabId?: string): Promise<void> {
+    const source = await this.locateChecked(from, tabId);
+    const target = await this.locateChecked(to, tabId);
+    try {
+      await source.dragTo(target, { timeout: ACTION_TIMEOUT });
+    } catch (err) {
+      throw explainError(`${from} -> ${to}`, err, ACTION_TIMEOUT);
+    }
   }
 
   async scroll(opts: { selector?: string; x?: number; y?: number }, tabId?: string): Promise<void> {
-    const page = this.getPage(tabId);
     if (opts.selector) {
-      await page.locator(opts.selector).scrollIntoViewIfNeeded({ timeout: 10000 });
+      await this.act(opts.selector, tabId, (loc) => loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT }));
     } else {
-      await page.evaluate(
+      await this.getPage(tabId).evaluate(
         ([x, y]) => window.scrollTo(x, y),
         [opts.x ?? 0, opts.y ?? 0] as [number, number]
       );
     }
   }
 
-  async waitFor(selector: string, timeout: number, tabId?: string): Promise<void> {
-    await this.getPage(tabId).waitForSelector(selector, { timeout });
+  async waitFor(opts: WaitOptions, tabId?: string): Promise<void> {
+    const page = this.getPage(tabId);
+    const { timeout } = opts;
+    if (opts.selector) {
+      await page.waitForSelector(resolveSelector(opts.selector), { state: opts.state ?? "visible", timeout });
+    } else if (opts.text !== undefined) {
+      const needle = opts.text;
+      await page.waitForFunction((t: string) => document.body?.innerText.includes(t) ?? false, needle, { timeout });
+    } else if (opts.url !== undefined) {
+      const fragment = opts.url;
+      await page.waitForURL((u) => u.toString().includes(fragment), { timeout });
+    } else if (opts.loadState) {
+      await page.waitForLoadState(opts.loadState, { timeout });
+    } else {
+      throw new Error("wait needs a selector, --text, --url, or --load-state.");
+    }
+  }
+
+  async snapshot(limit: number, tabId?: string): Promise<Snapshot> {
+    return await this.getPage(tabId).evaluate((max: number) => {
+      document.querySelectorAll("[data-cn-ref]").forEach((el) => el.removeAttribute("data-cn-ref"));
+
+      const interactive = [
+        "a[href]",
+        "button",
+        "input:not([type=hidden])",
+        "select",
+        "textarea",
+        "summary",
+        "[contenteditable='true']",
+        "[role=button],[role=link],[role=checkbox],[role=radio],[role=textbox],[role=menuitem],[role=tab],[role=option],[role=switch],[role=combobox],[role=searchbox]",
+      ].join(",");
+
+      const clean = (s: string | null | undefined): string => (s ?? "").replace(/\s+/g, " ").trim().slice(0, 100);
+
+      const isVisible = (el: Element): boolean => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+
+      const nameOf = (el: Element): string => {
+        const ariaLabel = clean(el.getAttribute("aria-label"));
+        if (ariaLabel) return ariaLabel;
+        const labelledBy = el.getAttribute("aria-labelledby");
+        if (labelledBy) {
+          const text = clean(
+            labelledBy
+              .split(/\s+/)
+              .map((id) => document.getElementById(id)?.textContent ?? "")
+              .join(" ")
+          );
+          if (text) return text;
+        }
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+          const labelText = clean(Array.from(el.labels ?? []).map((l) => l.textContent ?? "").join(" "));
+          if (labelText) return labelText;
+        }
+        return clean(
+          el.getAttribute("placeholder") ||
+            el.getAttribute("alt") ||
+            el.getAttribute("title") ||
+            (el as HTMLElement).innerText ||
+            el.textContent ||
+            el.getAttribute("value")
+        );
+      };
+
+      const implicitRole = (el: Element): string => {
+        const tag = el.tagName.toLowerCase();
+        if (tag === "a") return "link";
+        if (tag === "input") return (el as HTMLInputElement).type || "textbox";
+        if (tag === "textarea") return "textbox";
+        if (tag === "select") return "combobox";
+        return tag;
+      };
+
+      const elements: object[] = [];
+      let total = 0;
+      for (const el of Array.from(document.querySelectorAll(interactive))) {
+        if (!isVisible(el)) continue;
+        total++;
+        if (elements.length >= max) continue;
+
+        const ref = `e${elements.length + 1}`;
+        el.setAttribute("data-cn-ref", ref);
+
+        const entry: Record<string, unknown> = {
+          ref: `@${ref}`,
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute("role") || implicitRole(el),
+          name: nameOf(el),
+        };
+        if (el instanceof HTMLInputElement) entry.type = el.type;
+        if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) {
+          entry.checked = el.checked;
+        } else if (
+          el instanceof HTMLInputElement ||
+          el instanceof HTMLTextAreaElement ||
+          el instanceof HTMLSelectElement
+        ) {
+          // Never echo password values back to the caller.
+          if (!(el instanceof HTMLInputElement && el.type === "password") && el.value) entry.value = clean(el.value);
+        }
+        if (el instanceof HTMLAnchorElement) entry.href = el.href;
+        if (el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true") entry.disabled = true;
+        elements.push(entry);
+      }
+
+      return {
+        url: location.href,
+        title: document.title,
+        total,
+        truncated: total > elements.length,
+        elements,
+      } as Snapshot;
+    }, limit);
+  }
+
+  async traceStart(): Promise<void> {
+    if (!this.context) throw new Error("Not connected to Chrome.");
+    await this.context.tracing.start({ screenshots: true, snapshots: true });
+  }
+
+  async traceStop(path: string): Promise<void> {
+    if (!this.context) throw new Error("Not connected to Chrome.");
+    await this.context.tracing.stop({ path });
   }
 
   async screenshot(path: string, fullPage: boolean, tabId?: string): Promise<void> {
     await this.getPage(tabId).screenshot({ path, fullPage });
   }
 
-  async getText(selector: string | undefined, tabId?: string): Promise<string> {
+  async getText(selector: string | undefined, maxLength: number | undefined, tabId?: string): Promise<string> {
     const page = this.getPage(tabId);
+    let text: string;
     if (selector) {
-      return await page.locator(selector).innerText({ timeout: 10000 });
+      const loc = await this.locateChecked(selector, tabId);
+      text = await loc.innerText({ timeout: ACTION_TIMEOUT });
+    } else {
+      text = await page.evaluate(() => document.body.innerText);
     }
-    return await page.evaluate(() => document.body.innerText);
+    if (maxLength !== undefined && text.length > maxLength) {
+      return (
+        text.slice(0, maxLength) +
+        `\n... [truncated, ${text.length} total chars, use --selector or raise --max-length]`
+      );
+    }
+    return text;
   }
 
   async getDom(selector: string | undefined, maxLength: number, tabId?: string): Promise<string> {
     const page = this.getPage(tabId);
     let html: string;
     if (selector) {
-      html = await page.locator(selector).evaluate((el) => el.outerHTML);
+      const loc = await this.locateChecked(selector, tabId);
+      html = await loc.evaluate((el) => el.outerHTML);
     } else {
       html = await page.content();
     }
@@ -182,17 +428,19 @@ export class BrowserManager {
     return await this.getPage(tabId).evaluate(code);
   }
 
-  getConsoleLogs(tabId?: string, tail?: number): ConsoleEntry[] {
+  getConsoleLogs(tabId?: string, tail?: number, since?: number): ConsoleEntry[] {
     let logs = this.consoleLogs;
     if (tabId) logs = logs.filter((l) => l.tabId === tabId);
+    if (since !== undefined) logs = logs.filter((l) => l.seq > since);
     if (tail) logs = logs.slice(-tail);
     return logs;
   }
 
-  getNetworkLogs(tabId?: string, tail?: number, filter?: string): NetworkEntry[] {
+  getNetworkLogs(tabId?: string, tail?: number, filter?: string, since?: number): NetworkEntry[] {
     let logs = this.networkLogs;
     if (tabId) logs = logs.filter((l) => l.tabId === tabId);
     if (filter) logs = logs.filter((l) => l.url.includes(filter));
+    if (since !== undefined) logs = logs.filter((l) => l.seq > since);
     if (tail) logs = logs.slice(-tail);
     return logs;
   }

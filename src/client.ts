@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
 import * as fs from "fs";
 import { DAEMON_FLAG, CommandResponse } from "./types";
-import { DAEMON_LOG_FILE, ensureRuntimeDirs, readState, writeState } from "./paths";
+import { DAEMON_LOG_FILE, ensureAuthToken, ensureRuntimeDirs, readState, writeState } from "./paths";
 
 async function isDaemonReachable(port: number): Promise<boolean> {
   try {
@@ -42,11 +42,12 @@ export async function sendCommand(action: string, params: Record<string, unknown
   const state = readState();
   const daemonPort = state?.daemonPort ?? 9223;
   const chromePort = state?.chromePort ?? 9222;
+  const token = ensureAuthToken();
   await ensureDaemonRunning(daemonPort, chromePort);
 
   const res = await fetch(`http://127.0.0.1:${daemonPort}/command`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({ action, params }),
   });
   const body = (await res.json()) as CommandResponse;
@@ -63,7 +64,7 @@ export async function shutdownDaemon(): Promise<void> {
     try {
       await fetch(`http://127.0.0.1:${state.daemonPort}/command`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.token ?? ""}` },
         body: JSON.stringify({ action: "shutdown", params: {} }),
       });
     } catch {
