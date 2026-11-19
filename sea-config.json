@@ -1,0 +1,6 @@
+{
+  "main": "build/app/cli.cjs",
+  "output": "build/chrome-nav",
+  "disableExperimentalSEAWarning": true,
+  "assets": { "licenses": "build/licenses.txt" }
+}

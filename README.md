@@ -24,10 +24,32 @@ Set `CHROME_NAV_HOME` to use a different runtime directory (separate state, toke
 npm install
 npm run build      # bundles to build/app/cli.cjs
 npm run dev -- <command>   # run from source via tsx
-npm run package    # standalone macOS arm64 binary (chrome-nav-macos-arm64)
 ```
 
-Requires Node and a local Chrome or Chromium. If it isn't found automatically, set `CHROME_NAV_BINARY` to the executable path.
+Building or running from source requires Node.js 22.12 or newer. Browser commands require a local Chrome or Chromium. If it isn't found automatically, set `CHROME_NAV_BINARY` to the executable path.
+
+## Releases
+
+Download `chrome-nav-macos-arm64` and `chrome-nav-macos-arm64.sha256` from [GitHub Releases](https://github.com/gabriel-lopez/chrome-nav/releases). From the download directory:
+
+```sh
+shasum -a 256 -c chrome-nav-macos-arm64.sha256
+chmod +x chrome-nav-macos-arm64
+./chrome-nav-macos-arm64 --help
+```
+
+The binary is a single file that includes Node, so no separate Node install is needed. No npm package is published.
+
+### Publishing a release
+
+CI checks pull requests and pushes to `main`. Releases run on version tag pushes. Update the version in `package.json` and `package-lock.json` (for example with `npm version <version> --no-git-tag-version`), commit it to `main`, then tag and push:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow builds the native binary on a macOS arm64 runner (a Node.js single executable application, see `sea-config.json`) and publishes the binary, its SHA-256 checksum, and generated release notes to GitHub.
 
 ## Usage
 

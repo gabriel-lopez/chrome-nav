@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Build native binary
+        run: |
+          # Node SEA: embeds the bundle in a copy of the Node binary.
+          { echo "=== Node.js ==="; cat "$(dirname "$(dirname "$(command -v node)")")/LICENSE"
+            for f in commander/LICENSE playwright-core/LICENSE playwright-core/NOTICE; do
+              printf '\n=== %s ===\n' "$f"; cat "node_modules/$f"
+            done; } > build/licenses.txt
+          node --build-sea=sea-config.json
+          codesign --force --sign - build/chrome-nav
+          mv build/chrome-nav build/chrome-nav-macos-arm64
+          (cd build && shasum -a 256 chrome-nav-macos-arm64 > chrome-nav-macos-arm64.sha256)
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: macos-arm64
+          path: |
+            build/chrome-nav-macos-arm64
+            build/chrome-nav-macos-arm64.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: macos-arm64
+      - name: Publish release and assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum --check chrome-nav-macos-arm64.sha256
+          gh release create "$RELEASE_TAG" --generate-notes \
+            chrome-nav-macos-arm64 chrome-nav-macos-arm64.sha256
