@@ -1,6 +1,6 @@
 {
   "name": "chrome-nav",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI to drive a real Chrome instance via CDP (navigate, click, type, inspect DOM/console/network)",
   "private": true,
   "bin": {

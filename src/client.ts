@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { isSea } from "node:sea";
 import * as fs from "fs";
 import { DAEMON_FLAG, CommandResponse } from "./types";
 import { DAEMON_LOG_FILE, ensureAuthToken, ensureRuntimeDirs, readState, writeState } from "./paths";
@@ -29,9 +30,11 @@ async function ensureDaemonRunning(daemonPort: number, chromePort: number): Prom
   if (await isDaemonReachable(daemonPort)) return;
   ensureRuntimeDirs();
   const out = fs.openSync(DAEMON_LOG_FILE, "a");
+  // In a Node SEA binary the executable is the entrypoint; passing argv[1] would shift the daemon flag.
+  const entry = isSea() ? [] : [process.argv[1] ?? ""];
   const child = spawn(
     process.execPath,
-    [process.argv[1] ?? "", DAEMON_FLAG, String(daemonPort), String(chromePort)],
+    [...entry, DAEMON_FLAG, String(daemonPort), String(chromePort)],
     { detached: true, stdio: ["ignore", out, out] }
   );
   child.unref();
